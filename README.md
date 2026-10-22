@@ -2,8 +2,6 @@ Previsioni meteo
 
 Questo progetto è una piccola web app completa che automatizza la raccolta dei dati meteo, salva lo storico e mostra una dashboard con le condizioni attuali e le previsioni a breve e lungo termine.
 
-L'idea alla base è usare strumenti leggeri e veloci: un programma in C++ che richiede i dati ad Open Meteo, un database SQLite e un'interfaccia in PHP.
-
 Come funziona
 
 L'architettura si divide in quattro componenti principali:
@@ -27,7 +25,7 @@ Il progetto è pensato per girare su un server Linux (es. Debian o Ubuntu).
 
 1. Requisiti
 
-Ti serviranno il compilatore C++, NGINX, PHP e un paio di librerie per far girare il tutto. Puoi installarle con:
+Ti serviranno il compilatore C++, NGINX, PHP e un paio di librerie per far girare il tutto. Puoi installarle con (su linux):
 
 sudo apt install g++ libcurl4-openssl-dev libsqlite3-dev sqlite3 nginx php-fpm php-sqlite3 nlohmann-json3-dev
 
