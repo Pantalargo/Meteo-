@@ -1,225 +1,293 @@
 <?php
+date_default_timezone_set('Europe/Rome');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header("Content-Security-Policy: frame-ancestors 'none'");
 
-$dbPath = '/opt/weather/weather.db';
-$jsonForecastPath = '/opt/weather/forecast.json';
+const DB_PATH = '/opt/weather/weather.db';
+const FORECAST_PATH = '/opt/weather/forecast.json';
 
-$ultimoRilevamento = null;
+function esc($v): string { return htmlspecialchars((string) $v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function valore($v, int $d = 1): string { return number_format((float) $v, $d); }
+function rnd(): float { return mt_rand() / mt_getrandmax(); }
+
+/** Timestamp UTC del DB -> ora locale (gestisce l'ora legale). */
+function dataMeteo($utc, string $f = 'd/m/Y H:i'): string {
+    try {
+        return (new DateTimeImmutable((string) $utc, new DateTimeZone('UTC')))
+            ->setTimezone(new DateTimeZone('Europe/Rome'))->format($f);
+    } catch (Exception $e) {
+        return '—';
+    }
+}
+
+function wmo(int $c, bool $g): array {
+    $m = [0 => ['Sereno', '☀️', '🌙'], 1 => ['Quasi sereno', '🌤️', '🌙'], 2 => ['Parzialmente nuvoloso', '⛅', '☁️'], 3 => ['Nuvoloso', '☁️', '☁️'],
+        61 => ['Pioggia debole', '🌦️', '🌧️'], 63 => ['Pioggia', '🌧️', '🌧️'], 65 => ['Pioggia forte', '🌧️', '🌧️'],
+        73 => ['Neve', '❄️', '❄️'], 75 => ['Neve forte', '❄️', '❄️'], 82 => ['Acquazzone forte', '🌧️', '🌧️']]
+        + array_fill_keys([45, 48], ['Nebbia', '🌫️', '🌫️'])
+        + array_fill_keys([51, 53, 55], ['Pioviggine', '🌦️', '🌧️'])
+        + array_fill_keys([56, 57], ['Pioviggine gelata', '🌧️', '🌧️'])
+        + array_fill_keys([66, 67], ['Pioggia gelata', '🌧️', '🌧️'])
+        + array_fill_keys([71, 77], ['Neve debole', '🌨️', '🌨️'])
+        + array_fill_keys([80, 81], ['Acquazzone', '🌦️', '🌧️'])
+        + array_fill_keys([85, 86], ['Rovesci di neve', '🌨️', '🌨️'])
+        + array_fill_keys([95, 96, 99], ['Temporale', '⛈️', '⛈️']);
+    $r = $m[$c] ?? ['—', '☁️', '☁️'];
+    return [$r[0], $g ? $r[1] : $r[2]];
+}
+
+/** Ultimo rilevamento -> [scena, è giorno, emoji]. Usa il codice icona OpenWeather (suffisso d/n = giorno/notte). */
+function scena(?array $r): array {
+    $ic = (string) ($r['icona_codice'] ?? '');
+    if (preg_match('/^(\d{2})([dn])$/', $ic, $m)) {
+        $p = $m[1];
+        $g = $m[2] === 'd';
+    } else {
+        $h = (int) date('G');
+        $g = $h >= 7 && $h < 19;
+        $d = mb_strtolower((string) ($r['descrizione'] ?? ''));
+        $p = preg_match('/temporal/', $d) ? '11'
+            : (preg_match('/nev/', $d) ? '13'
+            : (preg_match('/piog|piov|acquaz/', $d) ? '10'
+            : (preg_match('/nebbi|foschi/', $d) ? '50'
+            : (preg_match('/nuvol|copert/', $d) ? '04' : '01'))));
+    }
+    $mappa = ['01' => ['sereno', '☀️', '🌙'], '02' => ['nuvoloso', '🌤️', '☁️'], '03' => ['nuvoloso', '⛅', '☁️'],
+        '04' => ['nuvoloso', '☁️', '☁️'], '09' => ['pioggia', '🌧️', '🌧️'], '10' => ['pioggia', '🌦️', '🌧️'],
+        '11' => ['temporale', '⛈️', '⛈️'], '13' => ['neve', '❄️', '❄️'], '50' => ['nebbia', '🌫️', '🌫️']];
+    $x = $mappa[$p] ?? $mappa['01'];
+    return [$x[0], $g, $g ? $x[1] : $x[2]];
+}
+
+/** N elementi decorativi con posizione, durata, ritardo e scala casuali. */
+function strato(int $n, string $cls, float $t0, float $t1, float $s0 = .6, float $s1 = 1.2): string {
+    $o = '';
+    for ($i = 0; $i < $n; $i++) {
+        $t = $t0 + rnd() * ($t1 - $t0);
+        $o .= sprintf('<i class="%s" style="--x:%d%%;--y:%d%%;--t:%.1fs;--w:-%.1fs;--s:%.2f"></i>',
+            $cls, mt_rand(0, 100), mt_rand(0, 100), $t, rnd() * $t, $s0 + rnd() * ($s1 - $s0));
+    }
+    return $o;
+}
+
+function cielo(string $scena, bool $giorno, string $vento): string {
+    $h = '<div class="sky" aria-hidden="true"><div class="astro"></div>';
+    if (!$giorno && $scena === 'sereno') $h .= strato(28, 'stella', 2.5, 6, .5, 1.3);
+    if ($scena !== 'sereno') $h .= strato($scena === 'nuvoloso' ? 4 : 5, 'nuvola', 70, 130, .8, 1.4);
+    if ($scena === 'pioggia' || $scena === 'temporale') $h .= strato(55, 'goccia', .55, 1.0, .7, 1.1);
+    if ($scena === 'temporale') $h .= '<div class="lampo"></div>';
+    if ($scena === 'neve') $h .= strato(40, 'fiocco', 7, 14, .5, 1.3);
+    if ($scena === 'nebbia') $h .= '<div class="foschia"></div><div class="foschia f2"></div>';
+    if ($vento !== 'calmo') {
+        $h .= $vento === 'forte' ? strato(9, 'raffica', 1.4, 2.6) : strato(5, 'raffica', 3, 5.5);
+    }
+    return $h . '</div>';
+}
+
+function sezioneValida($sezione, array $chiavi): bool {
+    if (!is_array($sezione)) return false;
+    foreach ($chiavi as $k) {
+        if (!isset($sezione[$k]) || !is_array($sezione[$k])) return false;
+    }
+    return true;
+}
+
+// ---------- Dati ----------
+$errore = null;
 $storico = [];
 $previsioni = null;
-$errore = null;
-
-function getWmoIconAndDesc($code) {
-    $codes = [
-        0 => ['Cielo sereno', '01d'],
-        1 => ['Prevalentemente sereno', '02d'],
-        2 => ['Parzialmente nuvoloso', '03d'],
-        3 => ['Nuvoloso', '04d'],
-        45 => ['Nebbia', '50d'], 48 => ['Nebbia', '50d'],
-        51 => ['Pioviggine', '09d'], 53 => ['Pioviggine', '09d'], 55 => ['Pioviggine', '09d'],
-        61 => ['Pioggia debole', '10d'], 63 => ['Pioggia', '10d'], 65 => ['Pioggia forte', '10d'],
-        71 => ['Neve', '13d'], 73 => ['Neve', '13d'], 75 => ['Neve forte', '13d'],
-        80 => ['Acquazzone', '09d'], 81 => ['Acquazzone', '09d'], 82 => ['Acquazzone forte', '09d'],
-        95 => ['Temporale', '11d'], 96 => ['Temporale', '11d'], 99 => ['Temporale', '11d']
-    ];
-    return $codes[$code] ?? ['Sconosciuto', '03d'];
-}
 
 try {
-    $db = new PDO('sqlite:' . $dbPath);
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    $db = new PDO('sqlite:' . DB_PATH, null, null, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_TIMEOUT => 5,
+    ]);
+    $storico = $db->query('SELECT * FROM dati_meteo ORDER BY data_ora DESC LIMIT 20')->fetchAll();
+} catch (Throwable $e) {
+    error_log('[index] ' . $e->getMessage());
+    $errore = 'Dati temporaneamente non disponibili.';
+}
+$ultimo = $storico[0] ?? null;
 
-    $query = $db->query('SELECT * FROM dati_meteo ORDER BY data_ora DESC LIMIT 20');
-    $storico = $query->fetchAll();
-
-    if (!empty($storico)) {
-        $ultimoRilevamento = $storico[0];
+if (is_readable(FORECAST_PATH)) {
+    try {
+        $dec = json_decode(file_get_contents(FORECAST_PATH), true, 16, JSON_THROW_ON_ERROR);
+        $previsioni = is_array($dec) ? $dec : null;
+    } catch (Throwable $e) {
+        error_log('[forecast] ' . $e->getMessage());
     }
-} catch (PDOException $e) {
-    $errore = 'Errore DB: ' . $e->getMessage();
 }
 
-if (file_exists($jsonForecastPath)) {
-    $rawJson = file_get_contents($jsonForecastPath);
-    $previsioni = json_decode($rawJson, true);
+if (isset($_GET['ajax'])) {
+    header('Cache-Control: no-store');
+    renderApp($errore, $ultimo, $previsioni, $storico);
+    exit;
 }
 
-function dataMeteo($data) {
-    return date('d/m/Y H:i', strtotime($data) + 7200);
-}
+function renderApp($errore, $ultimo, $prev, $storico) {
+    [$scena, $giorno, $emoji] = scena($ultimo);
+    $v = (float) ($ultimo['velocita_vento'] ?? 0);
+    $vento = $v >= 10 ? 'forte' : ($v >= 5 ? 'medio' : 'calmo');
+    $hOk = sezioneValida($prev['hourly'] ?? null, ['time', 'weather_code', 'temperature_2m']);
+    $dOk = sezioneValida($prev['daily'] ?? null, ['time', 'weather_code', 'temperature_2m_max', 'temperature_2m_min']);
+    $gs = ['Dom', 'Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab'];
+?>
+<div id="app" class="<?= $giorno ? 'tema-giorno' : 'tema-notte' ?> scena-<?= $scena ?> vento-<?= $vento ?>">
+<?= cielo($scena, $giorno, $vento) ?>
+<div class="container">
 
-function valore($dato, $decimali = 1) {
-    return number_format((float) $dato, $decimali);
-}
+    <header class="header">
+        <h1 class="pill">Stazione Meteo</h1>
+        <a href="mostraDB.php" class="pill">Archivio &rsaquo;</a>
+    </header>
 
+    <?php if ($errore): ?>
+        <div class="errore"><b>Impossibile caricare i dati</b><?= esc($errore) ?></div>
+    <?php endif; ?>
+
+    <?php if ($ultimo): ?>
+        <section class="bolla hero">
+            <h2 class="citta"><?= esc($ultimo['localita']) ?></h2>
+            <div class="em"><?= $emoji ?></div>
+            <div class="temp"><?= valore($ultimo['temperatura']) ?>&deg;</div>
+            <div class="desc"><?= esc($ultimo['descrizione']) ?></div>
+            <span class="pill">Rilevato il <?= esc(dataMeteo($ultimo['data_ora'])) ?></span>
+        </section>
+
+        <section class="tessere">
+            <div class="tessera"><small>Percepita</small><b><?= valore($ultimo['percepita']) ?>&deg;</b></div>
+            <div class="tessera"><small>Umidità</small><b><?= esc($ultimo['umidita']) ?>%</b></div>
+            <div class="tessera"><small>Pressione</small><b><?= esc($ultimo['pressione']) ?></b><em>hPa</em></div>
+            <div class="tessera"><small>Vento</small><b><?= valore($v) ?></b><em>m/s &middot; <?= valore($v * 3.6, 0) ?> km/h</em></div>
+        </section>
+    <?php endif; ?>
+
+    <?php if ($hOk): ?>
+        <section class="bolla">
+            <h3 class="titolo">Prossime 24 ore</h3>
+            <div class="orario">
+                <?php
+                $h = $prev['hourly'];
+                $start = array_search(date('Y-m-d\TH:00'), $h['time'], true);
+                if ($start === false) $start = 0;
+                $fine = min($start + 24, count($h['time']));
+                for ($i = $start; $i < $fine; $i++):
+                    if (!isset($h['weather_code'][$i], $h['temperature_2m'][$i])) continue;
+                    $ts = (int) strtotime((string) $h['time'][$i]);
+                    $ora = (int) date('G', $ts);
+                    $g = isset($h['is_day'][$i]) ? (bool) $h['is_day'][$i] : ($ora >= 7 && $ora < 19);
+                    [$desc, $em] = wmo((int) $h['weather_code'][$i], $g);
+                    $pr = (int) ($h['precipitation_probability'][$i] ?? 0);
+                ?>
+                    <div class="capsula" title="<?= esc($desc) ?>">
+                        <span><?= $i === $start ? 'Ora' : esc(date('H:i', $ts)) ?></span>
+                        <span class="em"><?= $em ?></span>
+                        <b><?= (int) round((float) $h['temperature_2m'][$i]) ?>&deg;</b>
+                        <?php if ($pr > 0): ?><small>💧 <?= $pr ?>%</small><?php endif; ?>
+                    </div>
+                <?php endfor; ?>
+            </div>
+        </section>
+    <?php endif; ?>
+
+    <?php if ($dOk): ?>
+        <section class="bolla">
+            <h3 class="titolo">Prossimi giorni</h3>
+            <div class="giorni">
+                <?php
+                $d = $prev['daily'];
+                for ($i = 0, $n = count($d['time']); $i < $n; $i++):
+                    if (!isset($d['weather_code'][$i], $d['temperature_2m_max'][$i], $d['temperature_2m_min'][$i])) continue;
+                    $ts = (int) strtotime((string) $d['time'][$i]);
+                    [$desc, $em] = wmo((int) $d['weather_code'][$i], true);
+                    $pr = (int) ($d['precipitation_probability_max'][$i] ?? 0);
+                ?>
+                    <div class="riga" title="<?= esc($desc) ?>">
+                        <span class="g"><?= $i === 0 ? 'Oggi' : esc($gs[(int) date('w', $ts)] . ' ' . date('d/m', $ts)) ?></span>
+                        <span class="em"><?= $em ?></span>
+                        <span class="p"><?= $pr > 0 ? '💧 ' . $pr . '%' : '' ?></span>
+                        <span class="r"><?= (int) round((float) $d['temperature_2m_max'][$i]) ?>&deg;<i><?= (int) round((float) $d['temperature_2m_min'][$i]) ?>&deg;</i></span>
+                    </div>
+                <?php endfor; ?>
+            </div>
+        </section>
+    <?php endif; ?>
+
+    <?php if ($storico): ?>
+        <section class="bolla">
+            <h3 class="titolo">Tendenze recenti</h3>
+            <div class="scroll">
+                <table>
+                    <thead><tr><th>Orario</th><th>Temp</th><th>Umidità</th><th>Vento</th><th>Condizioni</th></tr></thead>
+                    <tbody>
+                        <?php foreach ($storico as $r): ?>
+                            <tr>
+                                <td><?= esc(dataMeteo($r['data_ora'])) ?></td>
+                                <td class="caldo"><?= valore($r['temperatura']) ?>&deg;</td>
+                                <td><?= esc($r['umidita']) ?>%</td>
+                                <td><?= valore($r['velocita_vento']) ?> m/s</td>
+                                <td class="cap"><?= esc($r['descrizione']) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    <?php endif; ?>
+
+    <footer class="credito">
+        Dati meteo forniti da <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo</a>
+    </footer>
+
+</div>
+</div>
+<?php
+}
 ?>
 <!DOCTYPE html>
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Stazione Meteo</title>
-    <link rel="stylesheet" href="stile.css?v=<?= time() ?>">
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#2f80ed">
+    <link rel="icon" type="image/png" href="icons/icon-192.png">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <link rel="stylesheet" href="stile.css?v=<?= (int) @filemtime(__DIR__ . '/stile.css') ?>">
 </head>
 <body>
+<?php renderApp($errore, $ultimo, $previsioni, $storico); ?>
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
-<div class="container">
+// La barra di stato di Android prende il colore del cielo (giorno/notte/meteo)
+const colorTema = () => {
+    const app = document.getElementById('app'), meta = document.querySelector('meta[name=theme-color]');
+    const c = app ? getComputedStyle(app).getPropertyValue('--c1').trim() : '';
+    if (meta && c) meta.content = c;
+};
+colorTema();
 
-    <header class="header">
-        <h1>Stazione Meteo</h1>
-        <a href="mostraDB.php" class="btn-archive">Archivio Dati &rarr;</a>
-    </header>
-
-    <?php if ($errore): ?>
-        <div class="error-message">
-            <p class="error-title">Impossibile caricare i dati</p>
-            <p class="error-text"><?= htmlspecialchars($errore) ?></p>
-        </div>
-    <?php endif; ?>
-
-    <?php if ($ultimoRilevamento): ?>
-        <section class="glass-panel weather-widget">
-            <h2 class="city-name"><?= htmlspecialchars($ultimoRilevamento['localita']) ?></h2>
-            <p class="update-time">Rilevato il <?= dataMeteo($ultimoRilevamento['data_ora']) ?></p>
-
-            <div class="current-weather">
-                <div class="temp-main"><?= valore($ultimoRilevamento['temperatura']) ?>&deg;</div>
-                
-                <?php if (!empty($ultimoRilevamento['icona_codice'])): ?>
-                    <div class="condition">
-                        <img 
-                            src="https://openweathermap.org/img/wn/<?= htmlspecialchars($ultimoRilevamento['icona_codice']) ?>@2x.png" 
-                            alt="<?= htmlspecialchars($ultimoRilevamento['descrizione']) ?>" 
-                            class="weather-icon-placeholder"
-                        >
-                        <span class="condition-text"><?= htmlspecialchars($ultimoRilevamento['descrizione']) ?></span>
-                    </div>
-                <?php endif; ?>
-            </div>
-
-            <div class="weather-details-grid">
-                <div class="detail-item">
-                    <span class="detail-label">Percepita</span>
-                    <span class="detail-value"><?= valore($ultimoRilevamento['percepita']) ?>&deg;</span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">Umidità</span>
-                    <span class="detail-value"><?= htmlspecialchars($ultimoRilevamento['umidita']) ?>%</span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">Pressione</span>
-                    <span class="detail-value"><?= htmlspecialchars($ultimoRilevamento['pressione']) ?> <span class="unit">hPa</span></span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">Vento</span>
-                    <span class="detail-value"><?= valore($ultimoRilevamento['velocita_vento']) ?> <span class="unit">m/s</span></span>
-                </div>
-            </div>
-        </section>
-    <?php endif; ?>
-
-    <?php if (isset($previsioni['hourly'])): ?>
-        <section class="hourly-section">
-            <h3>Previsioni prossime 24 ore</h3>
-            <div class="hourly-slider">
-                <?php 
-                $hourly = $previsioni['hourly'];
-                $oraAttuale = date('Y-m-d\TH:00'); 
-                $startIndex = array_search($oraAttuale, $hourly['time']);
-                if ($startIndex === false) {
-                    $startIndex = 0;
-                }
-
-                $fineIndex = min($startIndex + 24, count($hourly['time']));
-                for ($i = $startIndex; $i < $fineIndex; $i++): 
-                    $oraFormatted = date('H:i', strtotime($hourly['time'][$i]));
-                    $code = $hourly['weather_code'][$i];
-                    list($desc, $icon) = getWmoIconAndDesc($code);
-                    $temp = round($hourly['temperature_2m'][$i]);
-                    $probRain = $hourly['precipitation_probability'][$i] ?? 0;
-                ?>
-                    <div class="glass-panel hourly-card">
-                        <span class="hourly-time"><?= ($i === $startIndex) ? 'Ora' : $oraFormatted ?></span>
-                        <img src="https://openweathermap.org/img/wn/<?= $icon ?>.png" alt="<?= $desc ?>" class="hourly-icon" title="<?= $desc ?>">
-                        <span class="hourly-temp"><?= $temp ?>°</span>
-                        <?php if ($probRain > 0): ?>
-                            <span class="hourly-rain">☔ <?= $probRain ?>%</span>
-                        <?php endif; ?>
-                    </div>
-                <?php endfor; ?>
-            </div>
-        </section>
-    <?php endif; ?>
-
-    <?php if (isset($previsioni['daily'])): ?>
-        <section class="forecast-section">
-            <h3>Previsioni per i prossimi giorni</h3>
-            <div class="forecast-grid">
-                <?php 
-                $daily = $previsioni['daily'];
-                for ($i = 0; $i < count($daily['time']); $i++): 
-                    $dataGiorno = date('d/m', strtotime($daily['time'][$i]));
-                    $giornoSettimana = date('D', strtotime($daily['time'][$i]));
-                    $code = $daily['weather_code'][$i];
-                    list($desc, $icon) = getWmoIconAndDesc($code);
-                    $tMax = round($daily['temperature_2m_max'][$i]);
-                    $tMin = round($daily['temperature_2m_min'][$i]);
-                    $probRain = $daily['precipitation_probability_max'][$i] ?? 0;
-                ?>
-                    <div class="glass-panel forecast-card">
-                        <span class="forecast-day"><?= $giornoSettimana ?> <?= $dataGiorno ?></span>
-                        <img src="https://openweathermap.org/img/wn/<?= $icon ?>.png" alt="<?= $desc ?>" class="forecast-icon">
-                        <span class="forecast-desc"><?= $desc ?></span>
-                        <div class="forecast-temp">
-                            <span class="temp-max"><?= $tMax ?>°</span>
-                            <span class="temp-min"><?= $tMin ?>°</span>
-                        </div>
-                        <?php if ($probRain > 0): ?>
-                            <span class="forecast-rain">☔ <?= $probRain ?>%</span>
-                        <?php endif; ?>
-                    </div>
-                <?php endfor; ?>
-            </div>
-        </section>
-    <?php endif; ?>
-
-    <section class="history-section">
-        <h3>Tendenze recenti (Archivio DB)</h3>
-        <?php if (!empty($storico)): ?>
-            <div class="glass-panel table-container">
-                <div class="table-scroll">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Orario</th>
-                                <th>Temp</th>
-                                <th>Umidità</th>
-                                <th>Vento</th>
-                                <th>Condizioni</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach ($storico as $rilevamento): ?>
-                                <tr>
-                                    <td class="fw-medium"><?= dataMeteo($rilevamento['data_ora']) ?></td>
-                                    <td><?= valore($rilevamento['temperatura']) ?>&deg;</td>
-                                    <td><?= htmlspecialchars($rilevamento['umidita']) ?>%</td>
-                                    <td><?= valore($rilevamento['velocita_vento']) ?> m/s</td>
-                                    <td class="capitalize"><?= htmlspecialchars($rilevamento['descrizione']) ?></td>
-                                </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        <?php endif; ?>
-    </section>
-
-    <footer style="text-align: center; opacity: 0.7; font-size: 13px; margin-top: 30px; margin-bottom: 20px;">
-        Dati meteo forniti da <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer" style="color: #fff; text-decoration: underline;">Open-Meteo</a>
-    </footer>
-
-</div>
-
+setInterval(async () => {
+    if (document.hidden) return;
+    try {
+        const r = await fetch('index.php?ajax=1');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const t = document.createElement('template');
+        t.innerHTML = (await r.text()).trim();
+        const nuovo = t.content.firstElementChild, app = document.getElementById('app');
+        if (!nuovo || !app) return;
+        // Se tema/condizione/vento sono cambiati ricarica anche il cielo, altrimenti solo i contenuti
+        if (nuovo.className !== app.className) app.replaceWith(nuovo);
+        else app.querySelector('.container').replaceWith(nuovo.querySelector('.container'));
+        colorTema();
+    } catch (e) {
+        console.error('Aggiornamento fallito:', e);
+    }
+}, 300000);
+</script>
 </body>
 </html>
